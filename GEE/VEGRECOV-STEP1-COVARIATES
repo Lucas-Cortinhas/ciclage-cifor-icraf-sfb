@@ -1,0 +1,101 @@
+// =================================================================================
+
+// asgarciaaa/Oikos-ICRAF/VEGRECOV-STEP1-Covariates
+// MODULE: ENVIRONMENTAL COVARIATES (STATIC & DYNAMIC)
+
+// =================================================================================
+
+
+
+
+
+// Exported Function 1: Topographic Modeling
+
+// Extracts static elevation and hydro-topographic constraints.
+
+exports.exportTopography = function(PROC_AOI) {
+
+  
+
+  var dem = ee.ImageCollection("COPERNICUS/DEM/GLO30")
+
+    .select('DEM')
+
+    .filterBounds(PROC_AOI) 
+
+    .mosaic()
+
+    .setDefaultProjection('EPSG:4326', null, 30);
+
+
+
+  var slope = ee.Terrain.slope(dem).clip(PROC_AOI);
+
+  var aspect = ee.Terrain.aspect(dem).clip(PROC_AOI);
+
+  
+
+  // Height Above Nearest Drainage (HAND) determines local hydrological connectivity.
+
+  var hand = ee.Image("MERIT/Hydro/v1_0_1").select('hnd').clip(PROC_AOI);
+
+
+
+  return {
+
+    dem: dem,
+
+    slope: slope,
+
+    aspect: aspect,
+
+    hand: hand
+
+  };
+
+};
+
+
+
+
+
+
+
+
+
+// Exported Function 2: Precipitation Dynamics
+
+// Extracts dynamic rainfall metrics to contextualize vegetation recovery signals.
+
+exports.exportPrecipitation = function(AOI, START_DATE, END_DATE) {
+
+  
+
+  // The temporal filter advances backward by 6 months to accommodate downstream 
+
+  // 3-month rolling accumulation algorithms without truncating the baseline data.
+
+  var precipBase = ee.ImageCollection("NASA/GPM_L3/IMERG_MONTHLY_V07")
+
+    .filterBounds(AOI)
+
+    .filterDate(ee.Date(START_DATE).advance(-6, 'month'), END_DATE)
+
+    .select('precipitation')
+
+    .map(function(img) {
+
+      // Multiplication transforms the hourly rate into an approximated monthly total.
+
+      return img.multiply(720).copyProperties(img, ['system:time_start']);
+
+    });
+
+    
+
+  return precipBase;
+
+};
+
+
+

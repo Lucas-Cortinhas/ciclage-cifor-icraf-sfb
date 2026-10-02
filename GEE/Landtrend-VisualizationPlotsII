@@ -1,0 +1,117 @@
+exports.generateUI = function(annualy, ALL_INDICES, M_segments, S_Threshold,
+                              Overshoot, Recovery, R_thershold, P_threshold, Model_prop,
+                              observation) {
+
+  var lt = require('users/lucascortinhas19/Export:Landtrend');
+
+  var inspectorPanel = ui.Panel({ style: {width: '450px', padding: '8px'} });
+  inspectorPanel.add(ui.Label({
+    value: 'Click on a location to inspect Vegetation Trajectories.',
+    style: {fontWeight: 'bold', fontSize: '16px', margin: '0 0 10px 0'}
+  }));
+  ui.root.insert(0, inspectorPanel);
+  
+  // Cria o layer UMA VEZ, com uma geometria "vazia"/placeholder
+  var selectedPixelLayer = ui.Map.Layer(
+    ee.Geometry.Point([0, 0]), {color: 'red'}, 'Selected Pixel', false // false = começa invisível
+  );
+  Map.layers().add(selectedPixelLayer);
+
+  var chartPoint = function(point2, distDir, nameband) {
+    var data = [['x', 'y-original', 'y-fitted']];
+    for (var i = 0; i < point2[0].length; i++) {
+      data.push([point2[0][i], point2[1][i] * distDir, point2[2][i] * distDir]);
+    }
+    inspectorPanel.add(
+      ui.Chart(data, 'LineChart', {
+        title: 'LandTrendr Segmentation ' + nameband,
+        hAxis: {title: 'Year', format: '####'},
+        vAxis: {maxValue: 1, minValue: -1},
+        series: {0: {pointSize: 3, lineWidth: 2}, 1: {pointSize: 3, lineWidth: 2}}
+      }, {columns: [0, 1, 2]})
+    );
+  };
+
+  Map.onClick(function(coords) {
+    inspectorPanel.clear();
+    var clickPoint = ee.Geometry.Point([coords.lon, coords.lat]);
+    //Map.layers().set(10, ui.Map.Layer(clickPoint, {color: 'red'}, 'Selected Pixel'));
+    
+    selectedPixelLayer.setEeObject(clickPoint);
+    selectedPixelLayer.setShown(true);
+    
+    var loadingLabel = ui.Label({
+      value: 'Plotting charts... (Evaluating temporal arrays)',
+      style: {fontWeight: 'bold', fontSize: '16px'}
+    });
+    inspectorPanel.add(loadingLabel);
+
+    // Uma única imagem multi-banda com todos os índices
+    var ltImage = ee.Image.cat(
+      ALL_INDICES.map(function(index) {
+        var result = lt.landtrend({
+          timeSeries: annualy.select([index]),
+          maxSegments: M_segments,
+          spikeThreshold: S_Threshold,
+          vertexCountOvershoot: Overshoot,
+          preventOneYearRecovery: Recovery,
+          recoveryThreshold: R_thershold,
+          pvalThreshold: P_threshold,
+          bestModelProportion: Model_prop,
+          minObservationsNeeded: observation
+        });
+        return result.rename('LandTrendr_' + index);
+      })
+    );
+    // Diagnóstico: quantos vértices por índice, no ponto clicado
+    var vertexCountImg = ee.Image.cat(
+      ALL_INDICES.map(function(index) {
+        var result = lt.landtrend({
+          timeSeries: annualy.select([index]),
+          maxSegments: M_segments,
+          spikeThreshold: S_Threshold,
+          vertexCountOvershoot: Overshoot,
+          preventOneYearRecovery: Recovery,
+          recoveryThreshold: R_thershold,
+          pvalThreshold: P_threshold,
+          bestModelProportion: Model_prop,
+          minObservationsNeeded: observation
+          
+        });
+        return result.select('LandTrendr').arraySlice(0,3,4)
+        .arrayReduce(ee.Reducer.sum(), [1])
+        .arrayGet([0,0])
+        .rename('nVertices_' + index);
+        
+      })
+      );
+      vertexCountImg.reduceRegion({
+        reducer: ee.Reducer.first(),
+        geometry: clickPoint,
+        scale: 10
+        
+      }).evaluate(function(result) {
+        print('Vértices por índice no pixel clicado:', result);
+        
+      });
+    
+    // Uma única chamada ao servidor, assíncrona (não trava a UI)
+    ltImage.reduceRegion({
+      reducer: ee.Reducer.mean().forEachElement(),
+      geometry: clickPoint,
+      scale: 10
+    }).evaluate(function(result, error) {
+      inspectorPanel.remove(loadingLabel);
+      if (error) {
+        inspectorPanel.add(ui.Label('Erro: ' + error));
+        return;
+      }
+      ALL_INDICES.forEach(function(index) {
+        chartPoint(result['LandTrendr_' + index], 1, index);
+      });
+    });
+  });
+
+  Map.style().set('cursor', 'crosshair');
+};
+

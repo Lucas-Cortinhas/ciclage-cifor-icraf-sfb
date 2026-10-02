@@ -1,0 +1,401 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var Amazonia = ee.FeatureCollection("projects/ee-lucascortinhas29/assets/amazonia_2"),
+    aluizio = ee.FeatureCollection("projects/ee-lucascortinhas29/assets/Aluizio_croqui_ajustado"),
+    new_gain = /* color: #05d618 */ee.FeatureCollection([]),
+    new_decline = /* color: #ff1010 */ee.FeatureCollection([]);
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+
+/**
+ * DECISION SUPPORT SYSTEM (DSS)  
+ * VEGETATION TRAJECTORIES - AMAZON BIOME 
+ * * Author: Andrea Garcia (Oikos) asgarciaaa@gmail.com & lucas Cortinhas lucas.cortinhas19@gmail.com
+ * * METHODOLOGICAL FRAMEWORK:
+ */
+ 
+
+// =============================================================================
+// 1. CONFIGURATION
+// =============================================================================
+Map.setOptions('SATELLITE');
+
+// seleção da amostras  treinadas para a operação de Machine Learning 
+//o primeiro seriao nome do arquivo locallizado como asset do usuario 
+// a vari´ável newbase deve ser usada pra gerar um novo conjunto de base de dados
+//para o classificador.
+var lTrain = 'base_samples-v10';
+
+
+var AOIf = Amazonia;
+var id = 211;//239,255,56,377,644,649,792,856,36,44?,211,226,
+//373,601,888,945,7,13,50,645,718,724,830?,857, 860?, 8, 549?, 677, 717?,4,11,12?, 64, 609, 10, 602?, 669, 784, 43, 48, 56
+var type = "id";
+
+AOIf = ee.FeatureCollection([AOIf.filter(ee.Filter.eq(type, id)).first()]);
+
+
+var AOI = AOIf.geometry();
+var PROC_AOI = AOI.buffer(30).bounds();
+
+//----- TOI - Time of interest:
+var START_DATE = ee.Date('2019-01-01');
+print("Image collection starting date: ", START_DATE.format('yyyy-MM-dd'));
+
+var END_DATE = ee.Date('2026-01-01');
+print("Image collection ending date: ", END_DATE.format('yyyy-MM-dd'));
+
+var INTV_START_DATE_RAW = START_DATE;
+var INTV_START_DATE = END_DATE;
+print("Intervention date: ", INTV_START_DATE);
+
+// Extract numerical month and day directly from the server-side date object
+var intvMonth = INTV_START_DATE_RAW.get('month');
+var intvDay = INTV_START_DATE_RAW.get('day');
+var endYearNum = END_DATE.get('year');
+
+// Construct the provisional alignment date vector via server-side numerical mapping
+var provisionalEndDate = ee.Date.fromYMD(endYearNum, intvMonth, intvDay);
+
+// Chronologically compare the provisional date against the absolute temporal boundary on the server
+var INTV_END_DATE = ee.Date(
+  ee.Algorithms.If(
+    provisionalEndDate.difference(END_DATE, 'day').gt(0),
+    provisionalEndDate.advance(-1, 'year'),
+    provisionalEndDate
+  )
+);
+
+print("Image collection ending date (aligned with intervention): ", INTV_END_DATE.format('yyyy-MM-dd'));
+
+//----- Target Indices
+var OPTICAL_INDICES = ['NBR','EVI','NDRE','SAVI','MSI','NDVI'];
+var SAR_INDICES = ['CpR'];
+var ALL_INDICES = OPTICAL_INDICES.concat(SAR_INDICES);
+print("All indices used:", ALL_INDICES);
+
+// configuration of selection bands to generate landtrendr algoritmn 
+var LT_INDEX = ALL_INDICES;
+
+// Parameters used for LandTrendr algoritm
+var M_segments = 2;
+var S_Threshold = 0.1;
+var Overshoot = 3;
+var Recovery = false;
+var R_thershold = 1;
+var P_threshold = 0.5; //0.7
+var Model_prop = 2.5;
+var observation = 2;
+
+
+// Unique index utilized for global map rendering and agreement statistics
+var VISUAL_INDEX = 'EVI';
+print("Index used to plot layers:", VISUAL_INDEX);
+
+
+
+//----- Parameters
+// Sentinel cloud parameter
+var CLOUD_PROB_THRESH = 30; 
+// HARMONIC_FREQ defines the number of complete trigonometric cycles per year.
+// A value of 1 fits a unimodal curve, capturing the single annual wet-dry.
+// A value of 2 fits two cycles in one year.
+var HARMONIC_FREQ = 1;
+// Target segment: First or historical baseline (0), last (-1), penultimate (-2).
+// Extracting the final segment (-1) explicitly targets the current recovery trajectory 
+// rather than historical deforestation events.
+var TARGET_SEGMENT = -1;
+
+
+// =============================================================================
+// 2. INTEGRATION OF ALL PRE-PROCESSED DATA
+// =============================================================================
+
+
+// ── 2.1 Import All Modules ────────────────────────────────────────────────────
+//var modDates      = require('users/asgarciaaa/Oikos-ICRAF:VEGRECOV-STEP1-DATES');
+var modCovariates = require('users/lucascortinhas19/CICLAGE:VEGRECOV-STEP1-COVARIATES');
+var modS2         = require('users/lucascortinhas19/CICLAGE:VEGRECOV-STEP1-SENSOR-Sentinel2');
+var modS1         = require('users/lucascortinhas19/CICLAGE:VEGRECOV-STEP1-SENSOR-Sentinel1');
+
+
+// ── 2.2 Execute Data Ingestion ────────────────────────────────────────────────
+// Topographic covariates: static, computed once for the processing extent.
+var topoData = modCovariates.exportTopography(PROC_AOI);
+
+// Precipitation base collection: extended 6 months before START_DATE to allow
+// the 95-day rolling accumulation to be correctly initialised at t=0.
+var precipBase = modCovariates.exportPrecipitation(AOI, START_DATE, END_DATE);
+
+// Sentinel-2 surface reflectance: cloud-masked, indices computed.
+var s2Processed = modS2.processOptical(PROC_AOI, START_DATE, END_DATE, 
+                    CLOUD_PROB_THRESH, OPTICAL_INDICES);
+
+// Sentinel-1 SAR: speckle-filtered in linear scale, CpR and VH_dB computed.
+var s1Processed = modS1.processSAR(PROC_AOI, START_DATE, END_DATE, SAR_INDICES);
+
+// ── 2.3 Enforce Consistent 10m Projection ────────────────────────────────────
+// All indices are reprojected to the native Sentinel-2 10m CRS.
+// This prevents mixed-resolution artefacts when optical and SAR bands are 
+// combined in the same image during classification.
+var s2Proj = s2Processed.first().select('B2').projection();
+
+var SIndexOpticalRaw = s2Processed.select(OPTICAL_INDICES)
+  .sort('system:time_start');
+
+var SIndexSARRaw = s1Processed.select(SAR_INDICES)
+  .sort('system:time_start');
+
+// Retain s2Proj only for use in export and reduceRegion calls downstream.
+var s2Proj = s2Processed.first().select('B2').projection();
+
+
+// ── 2.4 Temporal Regularization — 10-Day Median Compositing ─────────────────
+// Both sensors are composited into the same rigid 10-day grid so that CCDC and
+// LandTrendr receive temporally aligned observations from optical and SAR sources.
+// SAR is composited separately and later fused, because cloud masking applies
+// only to optical data (S1 is cloud-penetrating by nature).
+var totalDays    = END_DATE.difference(START_DATE, 'day');
+var timeSequence = ee.List.sequence(0, totalDays.subtract(1), 10);
+
+// Helper: builds one 10-day median composite from a raw collection.
+var make10DayComposite = function(rawCollection) {
+  return ee.ImageCollection.fromImages(
+    timeSequence.map(function(dayOffset) {
+      var tStart = START_DATE.advance(dayOffset, 'day');
+      var tEnd   = tStart.advance(10, 'day');
+      var window = rawCollection.filterDate(tStart, tEnd);
+      return window.median()
+        .set('system:time_start', tStart.millis())
+        .set('image_count',       window.size());
+    })
+  ).filter(ee.Filter.gt('image_count', 0));
+};
+
+var SIndexOptical = make10DayComposite(SIndexOpticalRaw);
+var SIndexSAR     = make10DayComposite(SIndexSARRaw);
+
+// ── 2.5 Sensor Fusion: Merge Optical and SAR into a Single Collection ─────────
+// Join SAR composites onto optical composites by closest timestamp (±35 days).
+// This preserves all optical observations while attaching the nearest SAR image.
+// When no SAR observation exists within the window, SAR bands are filled with 0.
+var sensorFusionFilter = ee.Filter.maxDifference({
+  difference:  35 * 24 * 60 * 60 * 1000,
+  leftField:  'system:time_start',
+  rightField: 'system:time_start'
+});
+var saveBestSAR = ee.Join.saveBest({ matchKey: 'sar_match', measureKey: 'time_diff' });
+
+var SIndex = ee.ImageCollection(saveBestSAR.apply(SIndexOptical, SIndexSAR, sensorFusionFilter))
+  .map(function(img) {
+    var sarImg = ee.Image(img.get('sar_match'));
+    
+    // If no SAR match exists within the tolerance window, fill with constant 0
+    // to avoid propagating nulls into downstream regression models.
+    var sarBands = ee.Algorithms.If(
+      sarImg,
+      sarImg.select(SAR_INDICES),
+      ee.Image.constant(0).rename(SAR_INDICES[0])
+        .addBands(ee.Image.constant(0).rename(SAR_INDICES[0]))
+    );
+    return img.addBands(sarBands).set('sar_match', null);
+  });
+
+  
+// =================================================================================
+// 3. LINEAR FITTING AND TEMPORAL SEGMENTATION (LandTrendr)
+// =================================================================================
+
+var startYearNum = ee.Date(START_DATE).get('year');
+var endYearNum = ee.Date(END_DATE).get('year');
+var years = ee.List.sequence(startYearNum, endYearNum);
+
+// Generate a collections of image for each year performing a Median calculation
+//in order t remove  all clouds and to have the most relevant fact happened in the area.
+var annualy = ee.ImageCollection.fromImages(
+    years.map(function(year){
+      var annual = SIndex.filter(ee.Filter.calendarRange(year,year,'year'))
+      .median()
+      .set('year',year)
+      .set('system:time_start', ee.Date.fromYMD(year,1,1).millis());
+      return annual;
+    })
+    ).filter(ee.Filter.listContains("system:band_names", "CpR"));
+
+
+//export function created in other scripts "LandTrend"
+var lt = require('users/lucascortinhas19/CICLAGE:Landtrend');
+
+
+var MIN_MAG = {
+  NBR: 0.03, EVI: 0.03, NDRE: 0.03, SAVI: 0.03, MSI: 0.03, NDVI: 0.03, CpR: 0.5
+};
+
+// Gera uma segmentação no formato de array pra cada um dos indices
+// Com essa segmentação cada uma é construido uma imagem com as respectivas
+//bandas e as une em um única image.
+var LandTrend_img = (function() {
+  return ee.Image.cat(
+    ALL_INDICES.map(function(index) {
+      var ltResult = lt.landtrend({
+        timeSeries:annualy.select([index]),
+        maxSegments: M_segments, //3 
+        spikeThreshold: S_Threshold, //0.9
+        vertexCountOvershoot:Overshoot,
+        preventOneYearRecovery:Recovery,
+        recoveryThreshold: R_thershold,//0.8
+        pvalThreshold: P_threshold,//1
+        bestModelProportion: Model_prop, //0.2
+        minObservationsNeeded:observation //1
+        });
+      return lt.landtrendImage(ltResult, index, MIN_MAG[index]);
+    })
+  );
+})();
+
+print('LT - Image', LandTrend_img);
+
+// =================================================================================
+// 4. RF - CLASSIFICATION
+// =================================================================================
+
+// select all bands with the start of "name_*" for classification 
+LandTrend_img = LandTrend_img.select(['mag_.*','rate_.*','startVal_.*','endVal_.*']);
+
+// Create a varyable to recieve ifnromation for classification 
+var final_samples;
+
+//Create a new base samples for classification. If not, use the base already informed in lTrain varyable
+var base_samples = ee.FeatureCollection('users/lucascortinhas19/'+lTrain);
+
+print(base_samples)
+
+// Cria uma nova variavel que cujo o typo seja Feature Collection 
+var new_geoms = ee.FeatureCollection([]);
+
+
+// Detectando se há presença de features chamados new_gain ou New_declaine 
+//para transformar em uma nova variável. 
+if (typeof new_gain !== 'undefined' && typeof new_decline !== 'undefined') {
+  new_geoms = new_gain.merge(new_decline);
+}else{print("new_gain & new_decline feature programmed: Please create geometry and turn into a feature collection in order to normal proceed")}
+
+var newTrain_samples = LandTrend_img.sampleRegions({
+    collection:new_geoms,
+    properties:['class'],
+    scale:10,
+    geometries: true
+  });
+
+
+var final_samples = ee.FeatureCollection(
+  ee.Algorithms.If(
+    newTrain_samples.size().gt(0),
+    base_samples.merge(newTrain_samples),
+    base_samples
+  )
+);
+
+
+newTrain_samples.size().evaluate(function(count){
+  if (count > 0) {
+    print("New Samples Detected:", count);
+  } else {
+    print("New samples not found... using base samples");
+  }
+});
+
+base_samples.get('system:id').evaluate(function(idString) {
+  var parts = idString.split('-v');
+  var currentVersion = Number(parts[1]);
+  var nextVersion = (currentVersion + 1).toString();
+      
+  var newName = 'RF-P3-v' + nextVersion;
+  var newPath = 'users/lucascortinhas19/' + newName;
+      
+  print('System ready. New version:', newName);
+  Export.table.toAsset({
+    collection: final_samples, 
+    description: newName,
+    assetId: newPath
+    
+  });
+  
+});
+
+
+
+
+
+var classifier = ee.Classifier.smileRandomForest(100).setOutputMode('PROBABILITY').train({
+  features:final_samples,
+  classProperty:'class',
+  inputProperties:LandTrend_img.bandNames()
+});
+
+var classification = LandTrend_img.classify(classifier);
+
+
+
+//////////////////////////////// Rule I - /////////////////////////////////////////////////
+var photogain = 0.70 ;  //0.8173245787620544  0.85583 
+var photoDecline = 0.50; //0.4402102828025818  0.4754103422164917
+var soil = 0.30;
+
+var Photosynthesis = ee.Image(0).where(classification.select('classification').lt(soil),0)
+                                .where(classification.select('classification').gte(soil).and(classification.select('classification').lt(photoDecline)),1)
+                                .where(classification.select('classification').gte(photoDecline).and(classification.select('classification').lt(photogain)),2)
+                                .where(classification.select('classification').gte(photogain),3).rename('classification');
+
+Photosynthesis = Photosynthesis.focalMode(3,'square');
+
+
+//*/
+// =================================================================================
+// 5. MAP ADD LAYER 
+// =================================================================================
+
+var s22023 = ee.Image(s2Processed
+  .filterDate(ee.Date(INTV_START_DATE).advance(-3, 'year'), INTV_START_DATE)
+  .median()
+  .clip(PROC_AOI));
+  
+var s22024 = ee.Image(s2Processed
+  .filterDate(ee.Date(INTV_START_DATE).advance(-2, 'year'), INTV_START_DATE)
+  .median()
+  .clip(PROC_AOI));
+
+
+var s22025 = ee.Image(s2Processed
+  .filterDate(ee.Date(INTV_END_DATE).advance(-1, 'year'), INTV_END_DATE)
+  .median()
+  .clip(PROC_AOI));
+  
+
+var outline = ee.Image().byte().paint({
+  featureCollection:  AOIf,
+  color: 1,
+  width: 1.5
+});
+
+Map.centerObject(AOIf, 16);
+Map.addLayer(s22024,{bands: ['B4', 'B3', 'B2'], min: 0.0217, max: 0.0896},"s2 - 2024",false);
+Map.addLayer(s22025,{bands: ['B4', 'B3', 'B2'], min:0.0217, max: 0.0896},"S2 - 2025",false);
+//Map.addLayer(annualy.first().clip(PROC_AOI), {},'Classification - RF', true);
+Map.addLayer(Photosynthesis.clip(PROC_AOI), {min:0, max:3,palette: ["ff3a00","ffcc06","04fffe","07b104"]},'Photosynthesis');
+Map.addLayer(outline, {palette: 'white'}, 'AOI');
+
+
+// =================================================================================
+// 6. GENERATE LANDTRENDR TIME SERIES CHART
+// =================================================================================
+var chart = require('users/lucascortinhas19/CICLAGE:Landtrend-VisualizationPlotsII');
+
+chart.generateUI(annualy, ALL_INDICES, M_segments,
+                S_Threshold, Overshoot, Recovery, R_thershold, P_threshold, Model_prop,
+                observation);
+
+/// EXPORT
+var base_samplesAll = ee.FeatureCollection('users/lucascortinhas19/'+lTrain);
+Export.table.toDrive({
+  collection:base_samplesAll,
+});
+

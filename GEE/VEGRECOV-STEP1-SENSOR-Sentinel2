@@ -1,0 +1,105 @@
+// =================================================================================
+
+// asgarciaaa/Oikos-ICRAF/VEGRECOV-STEP1-SENSOR-Sentinel2
+// MODULE: SENTINEL-2 OPTICAL PRE-PROCESSING
+
+// =================================================================================
+
+
+
+// Exported function handling multispectral data and cloud probability masking.
+
+exports.processOptical = function(PROC_AOI, START_DATE, END_DATE, CLOUD_PROB_THRESH, OPTICAL_INDICES) {
+
+  
+
+  var s2Sr = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED");
+
+  var s2Cloud = ee.ImageCollection("COPERNICUS/S2_CLOUD_PROBABILITY");
+
+
+
+  // An inner join fuses the surface reflectance data with the corresponding s2cloudless probability matrix.
+
+  var s2Joined = ee.ImageCollection(ee.Join.saveFirst('cloud_mask')
+
+    .apply({
+
+        primary: s2Sr.filterBounds(PROC_AOI).filterDate(START_DATE, END_DATE),
+
+        secondary: s2Cloud.filterBounds(PROC_AOI).filterDate(START_DATE, END_DATE),
+
+        condition: ee.Filter.equals({leftField: 'system:index', rightField: 'system:index'})
+
+    }));
+
+
+
+  // Internal function executing the bitwise quality extraction.
+
+  var maskS2 = function(img) {
+
+    var cloudProb = ee.Image(img.get('cloud_mask')).select('probability');
+
+    var isCloud = cloudProb.gt(CLOUD_PROB_THRESH);
+
+    
+
+    // Explicit evaluation of the QA60 band to eliminate cirrus and opaque clouds.
+
+    var qa = img.select('QA60');
+
+    var qaMask = qa.bitwiseAnd(1<<10).eq(0).and(qa.bitwiseAnd(1<<11).eq(0));
+
+    
+
+    // Scaling factor applied to convert integer digital numbers to floating-point reflectance.
+
+    return img.select(['B.*']).multiply(0.0001)
+
+        .updateMask(qaMask.and(isCloud.not()))
+
+        .clip(PROC_AOI)
+
+        .copyProperties(img, ['system:time_start'])
+
+        .set('cloud_mask', null); 
+
+  };
+
+
+
+  // Internal function calculating orthogonal biophysical metrics.
+
+  var addIndicesS2 = function(img) {
+
+    var evi = img.expression('2.5 * ((N - R) / (N + 6 * R - 7.5 * B + 1))', {
+
+        'N': img.select('B8'), 'R': img.select('B4'), 'B': img.select('B2')}).rename('EVI');
+
+    var savi = img.expression('((N - R) / (N + R + 0.5)) * 1.5', {
+
+        'N': img.select('B8'), 'R': img.select('B4')}).rename('SAVI');
+
+    var ndre = img.normalizedDifference(['B8', 'B5']).rename('NDRE');
+  
+    var ndvi = img.normalizedDifference(['B8','B4']).rename('NDVI');
+
+    var nbr = img.normalizedDifference(['B8', 'B12']).rename('NBR');
+
+    var msi = img.select('B11').divide(img.select('B8')).rename('MSI');
+
+
+
+    return img.addBands([ndvi, evi, savi, ndre, nbr, msi]);
+
+  };
+
+
+
+  // The sequential mapping paradigm executes the masking and mathematical transformations.
+
+  return s2Joined.map(maskS2).map(addIndicesS2);
+
+};
+
