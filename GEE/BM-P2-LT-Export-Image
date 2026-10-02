@@ -1127,16 +1127,6 @@ var gain =
  * DECISION SUPPORT SYSTEM (DSS)  
  * VEGETATION TRAJECTORIES - AMAZON BIOME 
  * * Author: Andrea Garcia (Oikos) asgarciaaa@gmail.com & lucas Cortinhas lucas.cortinhas19@gmail.com
- * * METHODOLOGICAL FRAMEWORK:
- * 1. Multi-sensor (Optical S2 + SAR S1).
- * 2. High-frequency (All clear observations).
- * 3. Environmental covariates (GPM Precip, GLO-30 DEM).
- * 4. Simple harmonic fitting for chart illustrations.
- * 5. Harmonic fitting and multispectral temporal segmentation (CCDC).
- * 6. Linear fitting and monospectral temporal segmentation (LandTrendr).
- * 7. Classify and calculate area.
- * 8. Plot layers.
- * 9. Inspect pixel. 
  */
  
 
@@ -1149,7 +1139,7 @@ Map.setOptions('SATELLITE');
 //o primeiro seriao nome do arquivo locallizado como asset do usuario 
 // a vari´ável newbase deve ser usada pra gerar um novo conjunto de base de dados
 //para o classificador.
-var lTrain = 'RF-P2-v25';
+var lTrain = 'base_samples-v10';
 var newbase = false;
 
 //var AOIf = ee.FeatureCollection("projects/ee-lucascortinhas29/assets/ManoelCarmo");
